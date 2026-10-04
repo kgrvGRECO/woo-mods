@@ -52,9 +52,15 @@ describe('the desktop pet bridge', () => {
     expect(pc.writes[0]?.path).toMatch(/\.claude\\clo\\sessions\\sess-1\.json$/)
     expect(pc.last()?.mood).toBe('idle')
     expect(pc.last()?.alive).toBe(NOW)
+    // 띄우는 방법은 이 플러그인이 설치된 곳의 경로 모양을 따른다(Windows면 PowerShell, 아니면 sh)
     const launch = pc.runs.find(a => a.join(' ').includes('clo_pet.pyw'))
-    expect(launch?.[0]).toBe('powershell.exe')
-    expect(launch?.join(' ')).toContain('Start-Process')
+    if ($.plugin.root.includes('\\')) {
+      expect(launch?.[0]).toBe('powershell.exe')
+      expect(launch?.join(' ')).toContain('Start-Process')
+    } else {
+      expect(launch?.[0]).toBe('sh')
+      expect(launch?.join(' ')).toContain('nohup')
+    }
   })
 
   test('auto_start off leaves the desktop pet alone until /pet', { options: { auto_start: 'off' } }, async ($, on) => {
