@@ -1,6 +1,6 @@
-// Claude 사용량 캐시 읽기: 상태줄 스크립트(awesome-statusline)가 1분마다
-// claude.ai 사용량 API 응답을 그대로 저장해 두는 파일(.claude_usage_cache)을 해석한다.
-// mod는 토큰을 만지지 않고 이 파일만 읽는다.
+// Claude 사용량 API 응답 해석: Claude Code의 /usage 가 받는 것과 같은 응답(api.anthropic.com/api/oauth/usage)을
+// mod가 세션의 자격 증명 핸들($.session.authorize)로 직접 받거나, 그게 안 될 때는 상태줄 스크립트
+// (awesome-statusline)가 같은 응답을 저장해 둔 파일(.claude_usage_cache)에서 읽는다. 토큰은 mod에 오지 않는다.
 //
 //   { "five_hour": { "utilization": 3.0, "resets_at": "…" }, "seven_day": { … },
 //     "limits": [ { "kind": "weekly_scoped", "percent": 100, "resets_at": "…",
@@ -17,8 +17,10 @@ export type CachedWindow = {
 }
 
 export type ClaudeCache = {
-  /** 파일이 마지막으로 바뀐 시각(ms) */
+  /** 받은 시각(ms): API면 받은 때, 파일이면 파일이 마지막으로 바뀐 때 */
   at: number
+  /** 어디서 왔는지: 사용량 API 직접(api) · 상태줄 캐시 파일(file). 없으면 옛 기록 */
+  source?: 'api' | 'file'
   fiveHour?: CachedWindow
   sevenDay?: CachedWindow
   /** 모델별 주간 한도: 이름(예: Fable)과 창 */

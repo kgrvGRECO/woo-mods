@@ -125,8 +125,19 @@ const USAGEBAR: CommandRunInput = {
   presentation: { isFullscreen: false, columns: 120 },
 }
 
-/** A Windows PC with one Codex session file and a Claude subscription */
-function windowsPc(on: On, options: { cache?: boolean } = {}) {
+/** A Windows PC with one Codex session file and a Claude subscription.
+ *  `cache`: the statusline's cache file exists. `api`: the session has a credential, and the usage API answers
+ *  (every call is counted in `api.calls`, the first one's request kept in `api.first`) */
+function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; first?: { url: string; init?: Record<string, unknown> }; text?: string } } = {}) {
+  if (options.api) {
+    const api = options.api
+    on('session.authorize', () => ({ value: { handle: 'cred-handle', kind: 'bearer' as const } }))
+    on('http.fetch', ($, e) => {
+      api.calls += 1
+      api.first ??= { url: e.url, init: e.init as Record<string, unknown> | undefined }
+      return { value: { status: 200, ok: true, headers: {}, text: api.text ?? CACHE } }
+    })
+  }
   const HOME = 'C:\\Users\\spdlq'
   const TEMP = `${HOME}\\AppData\\Local\\Temp`
   const CACHE_FILE = `${TEMP}\\.claude_usage_cache`
@@ -212,6 +223,25 @@ describe('the band', () => {
     await $.command.run(USAGEBAR)
     const compact = textOf(await $.ui.render(BAND('terminal')))
     expect(compact).toContain('Fable 100%')
+  })
+
+  test('the usage API through the session credential gives Fable in real time, and the cache file is not read', async ($, on) => {
+    const api = { calls: 0 } as { calls: number; first?: { url: string; init?: Record<string, unknown> } }
+    const clock = windowsPc(on, { cache: true, api })
+    await $.session.start({ surface: 'desktop', isInteractive: true, cwd: 'C:\\work' })
+    for (let i = 0; i < 30 && !allOf(await $.ui.render(BAND('desktop'))).includes('Fable'); i++) await clock.settle()
+    const desktop = allOf(await $.ui.render(BAND('desktop')))
+    expect(desktop).toContain('>Fable<')
+    expect(desktop).toContain('100%')
+    // the official usage endpoint, with the credential handle (never the token) and the OAuth beta header
+    expect(api.first?.url).toBe('https://api.anthropic.com/api/oauth/usage')
+    expect(api.first?.init?.auth).toBe('cred-handle')
+    expect((api.first?.init?.headers as Record<string, string>)['anthropic-beta']).toBe('oauth-2025-04-20')
+    // the API answer is the newest figure: its 주간 77% and 5시간 3% replace the engine's 18% and 42%
+    expect(desktop).toContain('77%')
+    expect(desktop).not.toContain('42%')
+    expect(desktop).not.toContain('기록')
+    expect(api.calls).toBe(1)
   })
 
   test('/usagebar cycles to one line, then hides', async ($, on) => {

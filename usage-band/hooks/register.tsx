@@ -6,8 +6,9 @@
 // 열마다 이름표·막대·퍼센트·리셋 시각의 자리를 맞춰 두 줄이 위아래로 정렬된다. 데스크톱 앱에서는
 // 글꼴이 고정폭이 아니어서 두 줄을 SVG 한 장(panel.ts)으로 그리고, 터미널에서는 칸 수를 세어 맞춘다.
 //
-// Claude 5시간·주간·컨텍스트는 Claude Code가 응답마다 받는 값이고, 모델별 주간 한도(Fable 등)는
-// 상태줄이 1분마다 받아 두는 사용량 캐시(claude-cache.ts)에서 읽는다. Codex 수치는 Codex가
+// Claude 5시간·주간·컨텍스트는 Claude Code가 응답마다 주는 값이고, 모델별 주간 한도(Fable 등)와 그 사이의
+// 갱신은 /usage 가 쓰는 사용량 API를 1분마다 세션의 자격 증명 핸들로 직접 받아서(claude-cache.ts) 채운다.
+// API를 못 쓰면(로그인 없음·게이트웨이) 상태줄이 남긴 캐시 파일로 대신한다. Codex 수치는 Codex가
 // 이 PC에 남긴 세션 기록에서 읽는다. /usagebar 로 두 줄 → 한 줄 → 숨김을 돌아가며 바꾼다.
 
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
@@ -30,6 +31,11 @@ const CLAUDE_LABEL: Record<string, string> = {
 const CLAUDE_COLOR = '#d97757'
 const CODEX_COLOR = '#3b6fe0'
 const STALE_MS = 15 * 60_000 // 캐시가 이보다 오래되면 "몇 분 전"을 붙인다
+// 사용량 API: Claude Code의 /usage 와 같은 곳. 자격 증명은 엔진이 핸들로 붙이므로 mod는 토큰을 보지 않는다
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+const USAGE_HEADERS = { 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json' }
+const FETCH_GAP_MS = 30_000 // 이보다 자주는 받지 않는다(턴이 연달아 끝나도)
+const NO_AUTH_RETRY_MS = 10 * 60_000 // 자격 증명이 없다고 하면 이만큼 뒤에 다시 물어본다
 
 // 모듈 상태(다시 불러오면 처음부터; 남길 값은 $.store에)
 let layout: Layout = 'full'
@@ -43,6 +49,8 @@ let isReading = false
 let cachePath = '' // Claude 사용량 캐시 파일(비어 있으면 아직 못 찾음)
 let configuredCache = ''
 let claudeCache: ClaudeCache | undefined
+let lastFetchAt = 0 // 사용량 API를 마지막으로 받은(또는 시도한) 때
+let noAuthUntil = 0 // 이때까지는 자격 증명을 다시 묻지 않는다
 let lastBandSize = ''
 let sessionTag = '' // 이 세션의 ID 앞 8자: 여러 세션이 같은 저장소를 쓰므로 기록에 누가 썼는지 남긴다
 // 이미 읽은 기록 파일: 크기·수정 시각이 같으면 다시 읽지 않는다
@@ -160,20 +168,53 @@ async function findCachePath($: EngineInterface): Promise<string> {
   return ''
 }
 
-async function refreshClaudeCache($: EngineInterface) {
+/** 사용량 API에서 직접 받는다(5시간·주간·모델별 주간). 받았으면 true, 자격 증명이 없거나 실패하면 false */
+async function fetchClaudeUsage($: EngineInterface): Promise<boolean> {
+  const now = await $.clock.now()
+  if (now - lastFetchAt < FETCH_GAP_MS || now < noAuthUntil) return claudeCache?.source === 'api'
+  lastFetchAt = now
+  let auth: { handle: string } | null = null
+  try {
+    auth = await $.session.authorize()
+  } catch {
+    auth = null // 시험 엔진처럼 자격 증명을 다루지 않는 곳
+  }
+  if (!auth) {
+    noAuthUntil = now + NO_AUTH_RETRY_MS
+    return false
+  }
+  try {
+    const r = await $.http.fetch(USAGE_URL, { auth: auth.handle, headers: USAGE_HEADERS })
+    if (!r.ok) return false
+    const next = parseClaudeCache(r.text, now)
+    if (!next) return false
+    claudeCache = { ...next, source: 'api' }
+    await $.store.set('claudeCache', claudeCache)
+    return true
+  } catch {
+    return false // 네트워크가 막혀도 띠는 계속 그린다
+  }
+}
+
+/** 상태줄이 남긴 캐시 파일에서 읽는다(API를 못 쓸 때의 대안) */
+async function readClaudeCacheFile($: EngineInterface) {
   try {
     cachePath ||= await findCachePath($)
     if (!cachePath) return
     const st = await $.fs.stat(cachePath)
-    if (claudeCache && claudeCache.at === st.mtimeMs) return
+    if (claudeCache && claudeCache.at >= st.mtimeMs) return // API 값이나 같은 파일을 이미 가졌다
     const next = parseClaudeCache(await $.fs.read(cachePath), st.mtimeMs)
     if (next) {
-      claudeCache = next
-      await $.store.set('claudeCache', next)
+      claudeCache = { ...next, source: 'file' }
+      await $.store.set('claudeCache', claudeCache)
     }
   } catch {
     // 캐시가 없거나 모양이 달라도 띠는 계속 그린다
   }
+}
+
+async function refreshClaudeCache($: EngineInterface) {
+  if (!(await fetchClaudeUsage($))) await readClaudeCacheFile($)
 }
 
 async function takeClaude($: EngineInterface, limits: SessionRateLimit[], ctx: number | undefined) {
@@ -221,7 +262,7 @@ export const register: Register = (on, options) => {
 
     void refreshClaudeCache($).then(() => refreshCodex($))
     $.clock.every(60_000, () => {
-      // 캐시·Codex 기록 다시 읽기 + 남은 시간 글자 갱신
+      // 사용량 API·Codex 기록 다시 받기 + 남은 시간 글자 갱신
       void refreshClaudeCache($).then(() => refreshCodex($))
     })
 
@@ -243,7 +284,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // 한 턴이 끝나면 Codex 쪽도 한 번 더 읽는다(Codex를 동시에 쓰는 경우)
+  // 한 턴이 끝나면 사용량 API(30초 간격 안이면 건너뜀)와 Codex 쪽도 한 번 더 받는다
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (!e.agentId) void refreshClaudeCache($).then(() => refreshCodex($))
@@ -404,7 +445,8 @@ function rowsOf(now: number): BandRow[] {
     const t = l.resetsAt ? Date.parse(l.resetsAt) : NaN
     return { pct: l.percentUsed, resetsAtMs: Number.isFinite(t) ? t : undefined }
   }
-  const isCacheNewer = claudeCache !== undefined && (!claude || claudeCache.at > claude.at)
+  // 같은 순간에 받았으면 사용량 API 쪽(모델별 한도까지 한 벌)을 쓴다
+  const isCacheNewer = claudeCache !== undefined && (!claude || claudeCache.at >= claude.at)
   const five = (isCacheNewer ? claudeCache?.fiveHour : undefined) ?? fromEngine('five_hour') ?? claudeCache?.fiveHour
   const week = (isCacheNewer ? claudeCache?.sevenDay : undefined) ?? fromEngine('seven_day') ?? claudeCache?.sevenDay
   const scoped = (claudeCache?.scoped ?? []).map(s => at(s.window, s.name)) // 모델별 주간 한도: 이름만(Fable)
@@ -415,7 +457,7 @@ function rowsOf(now: number): BandRow[] {
   const lastSeen = Math.max(claude?.at ?? 0, claudeCache?.at ?? 0)
   const claudeNote =
     !five && !week ? '첫 응답 뒤에 한도가 보여요' : (isClaudeFromStore && !isCacheNewer) || now - lastSeen > STALE_MS ? `${agoText(now - lastSeen)} 기록` : undefined
-  // 엔진 값은 새것인데 캐시(모델별 한도)만 오래된 경우
+  // 엔진 값은 새것인데 모델별 한도(API를 못 써서 파일이나 옛 기록에서 온 것)만 오래된 경우
   const cacheNote =
     claudeCache && scoped.length > 0 && now - claudeCache.at > STALE_MS
       ? `${claudeCache.scoped.map(s => s.name).join('·')} ${agoText(now - claudeCache.at)} 기록`
