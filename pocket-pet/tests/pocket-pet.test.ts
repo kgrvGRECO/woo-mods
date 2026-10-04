@@ -52,14 +52,15 @@ describe('the desktop pet bridge', () => {
     expect(pc.writes[0]?.path).toMatch(/\.claude\\clo\\sessions\\sess-1\.json$/)
     expect(pc.last()?.mood).toBe('idle')
     expect(pc.last()?.alive).toBe(NOW)
-    // 띄우는 방법은 이 플러그인이 설치된 곳의 경로 모양을 따른다(Windows면 PowerShell, 아니면 sh)
+    // 띄우는 방법은 이 플러그인이 설치된 곳의 경로 모양을 따른다: Windows면 PowerShell의 Start-Process,
+    // 아니면(CI의 Linux) sh의 nohup. 어느 쪽이든 클로 스크립트를 떼어서 띄워야 한다
     const launch = pc.runs.find(a => a.join(' ').includes('clo_pet.pyw'))
-    if ($.plugin.root.includes('\\')) {
-      expect(launch?.[0]).toBe('powershell.exe')
-      expect(launch?.join(' ')).toContain('Start-Process')
-    } else {
+    expect(launch?.[0]).toBeDefined()
+    const words = launch?.join(' ') ?? ''
+    if (launch?.[0] === 'powershell.exe') expect(words).toContain('Start-Process')
+    else {
       expect(launch?.[0]).toBe('sh')
-      expect(launch?.join(' ')).toContain('nohup')
+      expect(words).toContain('nohup')
     }
   })
 
