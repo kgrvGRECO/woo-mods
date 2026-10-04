@@ -1,0 +1,23 @@
+{
+  "name": "woo-mods",
+  "owner": {
+    "name": "정우용"
+  },
+  "metadata": {
+    "description": "정우용 선생님의 Claude Code mods"
+  },
+  "plugins": [
+    {
+      "name": "usage-band",
+      "source": "./usage-band",
+      "description": "프롬프트 위에 Claude(5시간·주간·Fable 등 모델별 주간)·Codex 사용량 막대",
+      "version": "0.6.3"
+    },
+    {
+      "name": "pocket-pet",
+      "source": "./pocket-pet",
+      "description": "바탕화면에 사는 픽셀 펫 클로: Claude 상태에 반응하고 마우스로 끌어 옮김",
+      "version": "0.6.1"
+    }
+  ]
+}

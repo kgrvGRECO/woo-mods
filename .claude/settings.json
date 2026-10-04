@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONIOENCODING=utf-8 python \"$CLAUDE_PROJECT_DIR/tools/sync_mods.py\"",
+            "timeout": 60,
+            "statusMessage": "mod를 데스크톱 앱에 반영하는 중"
+          }
+        ]
+      }
+    ]
+  }
+}

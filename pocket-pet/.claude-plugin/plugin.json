@@ -1,0 +1,32 @@
+{
+  "name": "pocket-pet",
+  "version": "0.6.1",
+  "description": "바탕화면에 사는 픽셀 펫 클로: Claude가 생각하고, 도구를 쓰고, 허락을 기다리고, 일을 마칠 때마다 반응합니다. 마우스로 끌어 옮길 수 있습니다",
+  "author": {
+    "name": "정우용"
+  },
+  "userConfig": {
+    "pet_name": {
+      "type": "string",
+      "title": "펫 이름",
+      "description": "말풍선에 보이는 이름",
+      "default": "클로"
+    },
+    "auto_start": {
+      "type": "string",
+      "title": "자동으로 띄우기",
+      "description": "on = Claude Code를 열면 바탕화면 클로도 뜹니다, off = /pet 으로만 띄웁니다",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
+    },
+    "python": {
+      "type": "string",
+      "title": "pythonw 경로 (선택)",
+      "description": "비워 두면 PATH의 pythonw를 씁니다",
+      "default": ""
+    }
+  }
+}

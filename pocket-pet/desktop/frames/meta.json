@@ -1,0 +1,29 @@
+{
+  "frames": {
+    "idle": 6,
+    "runRight": 8,
+    "runLeft": 8,
+    "waving": 4,
+    "jumping": 5,
+    "failed": 8,
+    "waiting": 6,
+    "running": 6,
+    "review": 6,
+    "look": 16
+  },
+  "sizes": {
+    "s": [
+      93,
+      89
+    ],
+    "m": [
+      140,
+      134
+    ],
+    "l": [
+      186,
+      178
+    ]
+  },
+  "look": "시선 16방향: 위=0°부터 시계 방향 22.5°씩"
+}
