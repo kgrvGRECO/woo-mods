@@ -24,6 +24,35 @@ export type CodexSnapshot = {
   short?: Window
   week?: Window
   plan?: string
+  /** 어디서 왔는지: 앱 서버에서 방금 받음(live) · 세션 기록에서 읽음(log). 없으면 옛 기록 */
+  source?: 'live' | 'log'
+}
+
+/** 앱 서버(`account/rateLimits/read`)의 답 → 스냅숏. 창 이름이 camelCase이고 resetsAt이 초 단위다 */
+export function snapshotFromAppServer(result: unknown, at: number): CodexSnapshot | undefined {
+  if (!result || typeof result !== 'object') return undefined
+  const rl = (result as { rateLimits?: unknown }).rateLimits
+  if (!rl || typeof rl !== 'object') return undefined
+  const r = rl as { primary?: unknown; secondary?: unknown; planType?: unknown }
+  const win = (raw: unknown): Window | undefined => {
+    if (!raw || typeof raw !== 'object') return undefined
+    const w = raw as { usedPercent?: unknown; windowDurationMins?: unknown; resetsAt?: unknown }
+    const pct = num(w.usedPercent)
+    if (pct === undefined) return undefined
+    const resets = num(w.resetsAt)
+    return { pct, windowMin: num(w.windowDurationMins), resetsAtMs: resets !== undefined && resets > 0 ? (resets < 1e12 ? resets * 1000 : resets) : undefined }
+  }
+  const wins = [win(r.primary), win(r.secondary)]
+  if (!wins[0] && !wins[1]) return undefined
+  const snap: CodexSnapshot = { at, source: 'live' }
+  wins.forEach((w, i) => {
+    if (!w) return
+    const isShort = w.windowMin !== undefined ? w.windowMin <= 1440 : i === 0
+    if (isShort) snap.short ??= w
+    else snap.week ??= w
+  })
+  if (typeof r.planType === 'string') snap.plan = r.planType
+  return snap
 }
 
 type RawWindow = {

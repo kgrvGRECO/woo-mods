@@ -8,13 +8,14 @@
 //
 // Claude 5시간·주간·컨텍스트는 Claude Code가 응답마다 주는 값이고, 모델별 주간 한도(Fable 등)와 그 사이의
 // 갱신은 /usage 가 쓰는 사용량 API를 1분마다 세션의 자격 증명 핸들로 직접 받아서(claude-cache.ts) 채운다.
-// API를 못 쓰면(로그인 없음·게이트웨이) 상태줄이 남긴 캐시 파일로 대신한다. Codex 수치는 Codex가
-// 이 PC에 남긴 세션 기록에서 읽는다. /usagebar 로 두 줄 → 한 줄 → 숨김을 돌아가며 바꾼다.
+// API를 못 쓰면(로그인 없음·게이트웨이) 상태줄이 남긴 캐시 파일로 대신한다. Codex 수치는 Codex CLI의 앱 서버에
+// 물어서(hooks/codex-limits.mjs, 공식 경로) 받고, 그게 안 되면 Codex가 이 PC에 남긴 세션 기록에서 읽는다.
+// /usagebar 로 두 줄 → 한 줄 → 숨김을 돌아가며 바꾼다.
 
 import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 import { parseClaudeCache, type ClaudeCache } from './claude-cache'
-import { effectivePct, lastSnapshot, type CodexSnapshot } from './codex'
+import { effectivePct, lastSnapshot, snapshotFromAppServer, type CodexSnapshot } from './codex'
 import { agoText, BAR_WIDTH, barParts, colorFor, columnsOf, cellWidth, padCells, padCellsStart, pctText, resetText, type BandRow, type Meter } from './format'
 import { panelSvg } from './panel'
 
@@ -36,6 +37,8 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const USAGE_HEADERS = { 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json' }
 const FETCH_GAP_MS = 30_000 // 이보다 자주는 받지 않는다(턴이 연달아 끝나도)
 const NO_AUTH_RETRY_MS = 10 * 60_000 // 자격 증명이 없다고 하면 이만큼 뒤에 다시 물어본다
+const CODEX_LIVE_GAP_MS = 30_000 // Codex 앱 서버에는 이보다 자주 묻지 않는다
+const CODEX_LIVE_RETRY_MS = 10 * 60_000 // 앱 서버를 못 띄우면(node·codex 없음) 이만큼 뒤에 다시 해 본다
 
 // 모듈 상태(다시 불러오면 처음부터; 남길 값은 $.store에)
 let layout: Layout = 'full'
@@ -51,6 +54,8 @@ let configuredCache = ''
 let claudeCache: ClaudeCache | undefined
 let lastFetchAt = 0 // 사용량 API를 마지막으로 받은(또는 시도한) 때
 let noAuthUntil = 0 // 이때까지는 자격 증명을 다시 묻지 않는다
+let lastCodexLiveAt = 0 // Codex 앱 서버에 마지막으로 물은 때
+let codexLiveDownUntil = 0 // 이때까지는 앱 서버 대신 세션 기록만 읽는다
 let lastBandSize = ''
 let sessionTag = '' // 이 세션의 ID 앞 8자: 여러 세션이 같은 저장소를 쓰므로 기록에 누가 썼는지 남긴다
 // 이미 읽은 기록 파일: 크기·수정 시각이 같으면 다시 읽지 않는다
@@ -141,11 +146,34 @@ async function readCodex($: EngineInterface): Promise<CodexSnapshot | undefined>
   return undefined
 }
 
+/** Codex 앱 서버에 지금 한도를 묻는다(공식 경로, hooks/codex-limits.mjs). 못 받으면 undefined */
+async function readCodexLive($: EngineInterface): Promise<CodexSnapshot | undefined> {
+  const now = await $.clock.now()
+  if (now < codexLiveDownUntil || now - lastCodexLiveAt < CODEX_LIVE_GAP_MS) return undefined
+  lastCodexLiveAt = now
+  const root = $.plugin.root
+  const script = [root, 'hooks', 'codex-limits.mjs'].join(root.includes('\\') ? '\\' : '/')
+  try {
+    const r = await $.process.run(['node', script], { timeoutMs: 20_000 })
+    const last = r.stdout.trim().split('\n').pop() ?? ''
+    const o = JSON.parse(last) as { ok?: boolean; at?: number; result?: unknown }
+    if (!o.ok) {
+      codexLiveDownUntil = now + CODEX_LIVE_RETRY_MS
+      return undefined
+    }
+    return snapshotFromAppServer(o.result, typeof o.at === 'number' ? o.at : now)
+  } catch {
+    codexLiveDownUntil = now + CODEX_LIVE_RETRY_MS // node나 codex가 없거나 시험 엔진
+    return undefined
+  }
+}
+
 async function refreshCodex($: EngineInterface) {
   if (isReading) return
   isReading = true
   try {
-    const snap = await readCodex($)
+    // 앱 서버가 답하면 그게 지금 값이고, 아니면 Codex가 남긴 세션 기록(마지막으로 쓴 때의 값)
+    const snap = (await readCodexLive($)) ?? (codex?.source === 'live' ? undefined : await readCodex($))
     if (snap) {
       codex = snap
       await $.store.set('codex', snap)
@@ -475,7 +503,8 @@ function rowsOf(now: number): BandRow[] {
     color: CODEX_COLOR,
     // 없는 창(요즘 Codex는 5시간 창이 없다)은 빈칸으로 두어 주간끼리 위아래로 맞춘다
     meters: codex?.short || codex?.week ? [codex.short ? at(codex.short, '5시간') : undefined, codex.week ? at(codex.week, '주간') : undefined] : [],
-    note: !codex ? '이 PC에 Codex 사용 기록이 없어요' : codex.at ? `${agoText(now - codex.at)} 기록` : undefined,
+    // 앱 서버에서 방금 받은 값에는 "몇 분 전 기록"을 붙이지 않는다(15분 넘게 못 받았으면 붙인다)
+    note: !codex ? '이 PC에 Codex 사용 기록이 없어요' : codex.source === 'live' && now - codex.at < STALE_MS ? undefined : codex.at ? `${agoText(now - codex.at)} 기록` : undefined,
   }
   return [claudeRow, codexRow]
 }

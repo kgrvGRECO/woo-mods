@@ -1,6 +1,6 @@
 {
   "name": "usage-band",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "프롬프트 바로 위에 Claude(5시간·주간·모델별 주간·컨텍스트)와 Codex 사용량을 열을 맞춘 막대로 보여 줍니다",
   "author": {
     "name": "정우용"
@@ -8,8 +8,8 @@
   "userConfig": {
     "codex_home": {
       "type": "string",
-      "title": "Codex 폴더 (선택)",
-      "description": "비워 두면 CODEX_HOME 또는 사용자 폴더의 .codex 를 씁니다",
+      "title": "Codex 폴더 (선택, 예비)",
+      "description": "Codex 한도는 보통 Codex CLI의 앱 서버(codex app-server)에 물어서 받습니다. node나 codex 명령이 없어서 못 받을 때만 이 폴더의 세션 기록(sessions/)을 읽습니다. 비워 두면 CODEX_HOME 또는 사용자 폴더의 .codex 를 씁니다",
       "default": ""
     },
     "usage_cache": {

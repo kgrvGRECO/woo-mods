@@ -128,7 +128,16 @@ const USAGEBAR: CommandRunInput = {
 /** A Windows PC with one Codex session file and a Claude subscription.
  *  `cache`: the statusline's cache file exists. `api`: the session has a credential, and the usage API answers
  *  (every call is counted in `api.calls`, the first one's request kept in `api.first`) */
-function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; first?: { url: string; init?: Record<string, unknown> }; text?: string } } = {}) {
+function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; first?: { url: string; init?: Record<string, unknown> }; text?: string }; codexLive?: { calls: number; argv?: readonly string[] } } = {}) {
+  if (options.codexLive) {
+    const live = options.codexLive
+    on('process.run', ($, e) => {
+      live.calls += 1
+      live.argv ??= e.argv
+      const answer = { ok: true, at: NOW, result: { rateLimits: { limitId: 'codex', primary: { usedPercent: 7, windowDurationMins: 10080, resetsAt: SEC(NOW + 5 * 86400_000) }, secondary: null, planType: 'prolite' } } }
+      return { value: { exitCode: 0, stdout: JSON.stringify(answer) + '\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+  }
   if (options.api) {
     const api = options.api
     on('session.authorize', () => ({ value: { handle: 'cred-handle', kind: 'bearer' as const } }))
@@ -242,6 +251,21 @@ describe('the band', () => {
     expect(desktop).not.toContain('42%')
     expect(desktop).not.toContain('기록')
     expect(api.calls).toBe(1)
+  })
+
+  test('Codex limits come from the app server when it answers, and carry no "기록" note', async ($, on) => {
+    const live = { calls: 0 } as { calls: number; argv?: readonly string[] }
+    const clock = windowsPc(on, { codexLive: live })
+    await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:\\work' })
+    for (let i = 0; i < 30 && !textOf(await $.ui.render(BAND('terminal'))).includes('7%'); i++) await clock.settle()
+    const text = textOf(await $.ui.render(BAND('terminal')))
+    expect(text).toContain('Codex')
+    expect(text).toContain('7%') // the app server's figure, not the 12%/30% of the session file
+    expect(text).not.toContain('12%')
+    expect(text).not.toContain('기록')
+    expect(live.argv?.[0]).toBe('node')
+    expect(String(live.argv?.[1])).toContain('codex-limits.mjs')
+    expect(live.calls).toBe(1)
   })
 
   test('/usagebar cycles to one line, then hides', async ($, on) => {

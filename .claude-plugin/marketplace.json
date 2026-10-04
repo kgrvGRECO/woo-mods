@@ -11,7 +11,7 @@
       "name": "usage-band",
       "source": "./usage-band",
       "description": "프롬프트 위에 Claude(5시간·주간·Fable 등 모델별 주간)·Codex 사용량 막대",
-      "version": "0.6.4"
+      "version": "0.6.5"
     },
     {
       "name": "pocket-pet",
