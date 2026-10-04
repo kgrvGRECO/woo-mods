@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Validate marketplace and plugins
+        run: |
+          claude --version
+          claude plugin validate .
+          claude plugin validate ./usage-band
+          claude plugin validate ./pocket-pet
+      - name: Versions in marketplace match plugin manifests
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          m = json.load(open('.claude-plugin/marketplace.json', encoding='utf-8'))
+          bad = []
+          for p in m['plugins']:
+              own = json.load(open(p['source'] + '/.claude-plugin/plugin.json', encoding='utf-8'))['version']
+              if own != p['version']:
+                  bad.append(f"{p['name']}: marketplace {p['version']} != plugin.json {own}")
+          print('\n'.join(bad) or 'versions match')
+          sys.exit(1 if bad else 0)
+          EOF
+      - name: Mod tests
+        run: |
+          claude plugin test ./usage-band
+          claude plugin test ./pocket-pet
+      - name: Python syntax
+        run: python3 -m py_compile tools/sync_mods.py pocket-pet/desktop/clo_pet.pyw pocket-pet/tools/make-frames.py
