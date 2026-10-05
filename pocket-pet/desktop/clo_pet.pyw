@@ -300,18 +300,11 @@ class Pet:
         self.canvas = tk.Canvas(root, bg=KEY, highlightthickness=0, bd=0)
         self.canvas.pack(fill='both', expand=True)
 
-        self.menu = tk.Menu(root, tearoff=0)
-        self.menu.add_command(label='Claude 열기', command=open_claude)
-        self.menu.add_command(label='쓰다듬기', command=self.pat)
+        # 오른쪽 클릭 메뉴는 기본 Tk 메뉴 대신 입력 카드와 같은 모양으로 직접 그린다(open_menu)
         self.bubble_var = tk.BooleanVar(value=bool(self.prefs.get('bubble', True)))
-        self.menu.add_checkbutton(label='말풍선 보이기', variable=self.bubble_var, command=self.toggle_bubble)
-        sizes = tk.Menu(self.menu, tearoff=0)
-        self.size_var = tk.StringVar(value=self.prefs.get('size', 'm'))
-        for tag, label in (('s', '작게'), ('m', '보통'), ('l', '크게')):
-            sizes.add_radiobutton(label=label, value=tag, variable=self.size_var, command=lambda t=tag: self.set_size(t))
-        self.menu.add_cascade(label='크기', menu=sizes)
-        self.menu.add_separator()
-        self.menu.add_command(label='끄기', command=self.quit)
+        self.menu_win = None  # 메뉴 창
+        self.menu_box = (0, 0, 0, 0)
+        self.menu_at = (0, 0)  # 메뉴를 연 자리(다시 그릴 때 같은 자리에)
 
         self.canvas.bind('<ButtonPress-1>', self.on_press)
         self.canvas.bind('<B1-Motion>', self.on_drag)
@@ -864,6 +857,7 @@ class Pet:
         self.remember_place()
 
     def toggle_bubble(self):
+        self.bubble_var.set(not self.bubble_var.get())
         self.prefs['bubble'] = bool(self.bubble_var.get())
         save_json(PREFS, self.prefs)
 
@@ -982,10 +976,11 @@ class Pet:
             # 클로와 입력 영역 사이 틈도 포함
             top, bottom = (y, self.foot_y) if self.panel_above else (self.foot_y - self.sprite_h, y + h)
             on_panel = x <= px <= x + w and top <= py <= bottom
-        if self.dropdown is not None:
-            dx, dy, dw, dh = self.dropdown_box
-            if dx <= self.pointer[0] <= dx + dw and dy <= self.pointer[1] <= dy + dh:
-                on_panel = True
+        for win, box in ((self.dropdown, self.dropdown_box), (self.menu_win, self.menu_box)):
+            if win is not None:
+                dx, dy, dw, dh = box
+                if dx <= self.pointer[0] <= dx + dw and dy <= self.pointer[1] <= dy + dh:
+                    on_panel = True
         if on_pet or on_panel:
             self.away_since = None
             if self.hover_since is None:
@@ -1144,11 +1139,127 @@ class Pet:
             open_claude()
             self.pat()
 
+    # ── 오른쪽 클릭 메뉴: 입력 카드·폴더 목록과 같은 크림색 카드에 둥근모꼴로 그린다 ──
+    SIZES = (('s', '작게'), ('m', '보통'), ('l', '크게'))
+
     def on_menu(self, e):
+        self.close_dropdown()
+        self.open_menu(e.x_root, e.y_root)
+
+    def open_menu(self, x, y):
+        self.close_menu()
+        d = self.dpi
+        u = lambda v: int(round(v * d))
+        w, pad, row_h, sep = u(216), u(6), u(30), u(8)
+        rows = ('open', 'pat', 'bubble', 'size', 'sep', 'quit')
+        h = pad * 2 + sum(sep if r == 'sep' else row_h for r in rows)
+        ink, line_w = '#3a2e27', max(1, u(1.5))
+
+        top = tk.Toplevel(self.root)
+        top.overrideredirect(True)
+        top.attributes('-topmost', True)
+        top.configure(bg=KEY)
         try:
-            self.menu.tk_popup(e.x_root, e.y_root)
-        finally:
-            self.menu.grab_release()
+            top.attributes('-transparentcolor', KEY)
+        except tk.TclError:
+            pass
+        cv = tk.Canvas(top, bg=KEY, highlightthickness=0, bd=0, width=w, height=h)
+        cv.pack()
+        self.rounded(1, 1, w - 2, h - 2, u(12), fill=CARD, outline=CARD_LINE, width=max(1, u(1)), cv=cv)
+
+        def row(tag, y0, label, on_click=None, hover=True):
+            """한 줄: 둥근 바탕(마우스를 올리면 살구색) + 아이콘 자리 + 이름. (아이콘 x, 세로 가운데)를 돌려준다"""
+            bg = self.rounded(pad, y0 + u(2), w - pad, y0 + row_h - u(2), u(9), fill=CARD, outline='', tags=(tag,), cv=cv)
+            cy = y0 + row_h / 2
+            ix = pad + u(10)
+            cv.create_text(ix + u(20), cy, text=label, anchor='w', font=self.entry_font, fill=ink, tags=(tag,))
+            if on_click:
+                cv.tag_bind(tag, '<Button-1>', lambda e: on_click())
+            if hover:
+                cv.tag_bind(tag, '<Enter>', lambda e: (cv.itemconfigure(bg, fill=SOFT_HOVER), cv.configure(cursor='hand2')))
+                cv.tag_bind(tag, '<Leave>', lambda e: (cv.itemconfigure(bg, fill=CARD), cv.configure(cursor='')))
+            return ix, cy
+
+        def then_close(fn):
+            return lambda: (self.close_menu(), fn())
+
+        def redraw(fn):  # 설정을 바꾸는 줄은 메뉴를 닫지 않고 같은 자리에 다시 그린다
+            return lambda: (fn(), self.open_menu(*self.menu_at))
+
+        right = w - pad - u(8)
+        ry = pad
+        for kind in rows:
+            tag = 'row_' + kind
+            if kind == 'open':  # 주황 반짝이 + Claude 열기
+                ix, cy = row(tag, ry, 'Claude 열기', then_close(open_claude))
+                cv.create_text(ix + u(6), cy, text='✦', font=('Segoe UI Symbol', -u(12), 'bold'), fill=ACCENT, tags=(tag,))
+            elif kind == 'pat':  # 하트 + 쓰다듬기
+                ix, cy = row(tag, ry, '쓰다듬기', then_close(self.pat))
+                cv.create_text(ix + u(6), cy, text='♥', font=('Segoe UI Symbol', -u(12), 'bold'), fill='#ff5470', tags=(tag,))
+            elif kind == 'bubble':  # 작은 말풍선 + 스위치
+                on = bool(self.bubble_var.get())
+                ix, cy = row(tag, ry, '말풍선 보이기', redraw(self.toggle_bubble))
+                self.rounded(ix, cy - u(5), ix + u(12), cy + u(3), u(3), fill='', outline=INK, width=line_w, tags=(tag,), cv=cv)
+                cv.create_polygon(ix + u(3), cy + u(2), ix + u(6), cy + u(2), ix + u(3), cy + u(5), fill=INK, outline='', tags=(tag,))
+                tw, th = u(26), u(14)
+                self.rounded(right - tw, cy - th / 2, right, cy + th / 2, th / 2, fill=ACCENT if on else SOFT,
+                             outline='' if on else CARD_LINE, width=max(1, u(1)), tags=(tag,), cv=cv)
+                kr = u(5)
+                kx = right - u(2) - kr if on else right - tw + u(2) + kr
+                cv.create_oval(kx - kr, cy - kr, kx + kr, cy + kr, fill='#ffffff' if on else INK, outline='', tags=(tag,))
+            elif kind == 'size':  # 크고 작은 네모 + 작게/보통/크게 알약 토글(입력 카드의 Code/대화 토글과 같은 모양)
+                ix, cy = row(tag, ry, '크기', hover=False)
+                cv.create_rectangle(ix, cy + u(1), ix + u(4), cy + u(5), outline=INK, width=line_w, tags=(tag,))
+                cv.create_rectangle(ix + u(6), cy - u(5), ix + u(13), cy + u(5), outline=INK, width=line_w, tags=(tag,))
+                seg_w, seg_h = u(40), u(22)
+                px0 = right - (3 * seg_w + u(4))
+                self.rounded(px0, cy - seg_h / 2, right, cy + seg_h / 2, seg_h / 2, fill=SOFT, outline='', tags=(tag,), cv=cv)
+                for i, (size, label) in enumerate(self.SIZES):
+                    sx = px0 + u(2) + i * seg_w
+                    on = self.size == size
+                    st = (tag, 'size_' + size)
+                    self.rounded(sx, cy - seg_h / 2 + u(2), sx + seg_w, cy + seg_h / 2 - u(2), (seg_h - u(4)) / 2,
+                                 fill=ACCENT if on else SOFT, outline='', tags=st, cv=cv)
+                    cv.create_text(sx + seg_w / 2, cy, text=label, font=self.bold_font, fill='#ffffff' if on else INK, tags=st)
+                    cv.tag_bind('size_' + size, '<Button-1>', lambda e, s=size: redraw(lambda: self.set_size(s))())
+                    cv.tag_bind('size_' + size, '<Enter>', lambda e: cv.configure(cursor='hand2'))
+                    cv.tag_bind('size_' + size, '<Leave>', lambda e: cv.configure(cursor=''))
+            elif kind == 'sep':
+                cv.create_line(pad + u(8), ry + sep / 2, w - pad - u(8), ry + sep / 2, fill=CARD_LINE, width=max(1, u(1)))
+                ry += sep
+                continue
+            else:  # 전원 표시 + 끄기
+                ix, cy = row(tag, ry, '끄기', then_close(self.quit))
+                cv.create_arc(ix + u(1), cy - u(5), ix + u(11), cy + u(5), start=60, extent=300, style='arc', outline=INK,
+                              width=line_w, tags=(tag,))
+                cv.create_line(ix + u(6), cy - u(6), ix + u(6), cy - u(1), fill=INK, width=line_w, tags=(tag,))
+            ry += row_h
+
+        # 마우스 자리에(화면 밖으로 나가면 안쪽으로, 아래가 모자라면 위로)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        sx = max(0, min(sw - w, x))
+        sy = max(0, min(sh - u(48) - h, y))
+        top.geometry(f'{w}x{h}+{sx}+{sy}')
+        self.menu_win, self.menu_box, self.menu_at = top, (sx, sy, w, h), (x, y)
+        # 닫기: Esc, 메뉴 밖 클릭(그랩으로 받는다), 다른 창으로 초점이 옮겨감
+        top.bind('<Escape>', lambda e: self.close_menu())
+        top.bind('<ButtonPress>', lambda e: None if 0 <= e.x < w and 0 <= e.y < h else self.close_menu())
+        top.bind('<FocusOut>', lambda e: self.close_menu() if self.menu_win is top else None)
+        top.update_idletasks()
+        top.focus_force()
+        try:
+            top.grab_set()
+        except tk.TclError:
+            pass
+
+    def close_menu(self):
+        top, self.menu_win = self.menu_win, None
+        if top is not None:
+            try:
+                top.grab_release()
+            except tk.TclError:
+                pass
+            top.destroy()
 
     def pat(self):
         self.love_until = time.time() + LINGER['love']

@@ -17,7 +17,7 @@
       "name": "pocket-pet",
       "source": "./pocket-pet",
       "description": "바탕화면에 사는 픽셀 펫 클로: Claude 상태에 반응하고 마우스로 끌어 옮김",
-      "version": "0.6.1"
+      "version": "0.6.2"
     }
   ]
 }
