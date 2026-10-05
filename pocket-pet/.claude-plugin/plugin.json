@@ -1,6 +1,6 @@
 {
   "name": "pocket-pet",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "바탕화면에 사는 픽셀 펫 클로: Claude가 생각하고, 도구를 쓰고, 허락을 기다리고, 일을 마칠 때마다 반응합니다. 마우스로 끌어 옮길 수 있습니다",
   "author": {
     "name": "정우용"
