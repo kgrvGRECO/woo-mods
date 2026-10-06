@@ -89,7 +89,10 @@ export function paceOf(m: Meter, now: number): { delta: number; text: string; co
 }
 
 export function panelSvg(rows: BandRow[], now: number, width = WIDTH): { svg: string; width: number; height: number } {
-  const subOf = (r: BandRow) => (r.tail ? `ctx ${pctText(r.tail.pct)}` : (r.note ?? '').replace(/ 기록$/, ''))
+  // 이름 밑 작은 글자: 메모(옛 기록·못 받는 까닭)가 있으면 그것을, 없으면 컨텍스트. 메모는 뭔가 어긋났을 때만 생기므로
+  // 그때는 컨텍스트보다 먼저 보여야 한다
+  const noteOf = (r: BandRow) => (r.note ?? '').replace(/ 기록(?= ·|$)/, '')
+  const subOf = (r: BandRow) => (r.note ? noteOf(r) : r.tail ? `ctx ${pctText(r.tail.pct)}` : '')
   const nameW = Math.max(...rows.map(r => Math.max(textWidth(r.name, BIG), textWidth(subOf(r))))) + 14
   const tileW = Math.floor((width - nameW - TILE_GAP * (COLS - 1)) / COLS)
 
@@ -99,13 +102,13 @@ export function panelSvg(rows: BandRow[], now: number, width = WIDTH): { svg: st
     const text = (tx: number, ty: number, s: string, cls: string, extra = '') =>
       parts.push(`<text x="${tx}" y="${ty}"${cls ? ` class="${cls}"` : ''}${extra}>${esc(s)}</text>`)
     const prov = PROVIDER[r.name] ?? { cls: 'c', color: r.color }
-    // 이름과 그 밑 작은 글자(컨텍스트 또는 기록 시각)
+    // 이름과 그 밑 작은 글자(메모가 있으면 메모, 아니면 컨텍스트)
     text(0, y + 13, r.name, 'b', ` fill="${prov.color}"`)
-    if (r.tail) {
+    if (r.note) {
+      text(0, y + 30, noteOf(r), 'mut')
+    } else if (r.tail) {
       text(0, y + 30, 'ctx', 'mut')
       text(textWidth('ctx '), y + 30, pctText(r.tail.pct), '', ` fill="${levelColor(r.tail.pct)}"`)
-    } else if (r.note) {
-      text(0, y + 30, subOf(r), 'mut')
     }
 
     const meters = r.meters.filter((m): m is Meter => m !== undefined).slice(0, COLS)
