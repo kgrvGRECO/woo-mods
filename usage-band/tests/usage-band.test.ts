@@ -128,7 +128,17 @@ const USAGEBAR: CommandRunInput = {
 /** A Windows PC with one Codex session file and a Claude subscription.
  *  `cache`: the statusline's cache file exists. `api`: the session has a credential, and the usage API answers
  *  (every call is counted in `api.calls`, the first one's request kept in `api.first`) */
-function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; first?: { url: string; init?: Record<string, unknown> }; text?: string }; codexLive?: { calls: number; argv?: readonly string[] } } = {}) {
+function windowsPc(
+  on: On,
+  options: {
+    cache?: boolean
+    /** `status`/`headers`: the API answers that instead of 200 (a 429 with Retry-After, say) */
+    api?: { calls: number; first?: { url: string; init?: Record<string, unknown> }; text?: string; status?: number; headers?: Record<string, string> }
+    codexLive?: { calls: number; argv?: readonly string[] }
+    /** what the plugin's store holds at the start (another session's figures, say) */
+    store?: Record<string, unknown>
+  } = {},
+) {
   if (options.codexLive) {
     const live = options.codexLive
     on('process.run', ($, e) => {
@@ -144,7 +154,8 @@ function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; fi
     on('http.fetch', ($, e) => {
       api.calls += 1
       api.first ??= { url: e.url, init: e.init as Record<string, unknown> | undefined }
-      return { value: { status: 200, ok: true, headers: {}, text: api.text ?? CACHE } }
+      const status = api.status ?? 200
+      return { value: { status, ok: status < 300, headers: api.headers ?? {}, text: api.text ?? CACHE } }
     })
   }
   const HOME = 'C:\\Users\\spdlq'
@@ -152,6 +163,7 @@ function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; fi
   const CACHE_FILE = `${TEMP}\\.claude_usage_cache`
   const DAY = `${HOME}\\.codex\\sessions\\2026\\10\\02`
   on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.measure', ($, e) => ({ changed: e.changed }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.render', { component: 'AbovePrompt' }, () => ENGINE_BAND)
@@ -180,7 +192,7 @@ function windowsPc(on: On, options: { cache?: boolean; api?: { calls: number; fi
   })
   on('fs.read', ($, e) => ({ value: at(e.path) === CACHE_FILE ? CACHE : [LINE_NEW, LINE_NULL].join('\n') }))
   mock.env(on, { USERPROFILE: HOME, TEMP })
-  mock.store(on, {})
+  mock.store(on, options.store ?? {})
   return mock.clock(on, { now: NOW })
 }
 
@@ -251,6 +263,52 @@ describe('the band', () => {
     expect(desktop).not.toContain('42%')
     expect(desktop).not.toContain('기록')
     expect(api.calls).toBe(1)
+  })
+
+  test('a refused usage API (429) is retried after Retry-After, not every minute; the stale note says why', async ($, on) => {
+    const api = { calls: 0, status: 429, headers: { 'retry-after': '300' } }
+    const clock = windowsPc(on, { cache: true, api })
+    await $.session.start({ surface: 'desktop', isInteractive: true, cwd: 'C:\work' })
+    for (let i = 0; i < 30 && !allOf(await $.ui.render(BAND('desktop'))).includes('Fable'); i++) await clock.settle()
+    // the cache file stands in: Fable from it, 5시간·주간 from the engine
+    let desktop = allOf(await $.ui.render(BAND('desktop')))
+    expect(desktop).toContain('>Fable<')
+    expect(desktop).toContain('100%')
+    expect(desktop).toContain('42%')
+    expect(api.calls).toBe(1)
+    // the minute timer does not hammer the API while it says to wait
+    await clock.advance(3 * 60_000)
+    expect(api.calls).toBe(1)
+    await clock.advance(2 * 60_000 + 1_000)
+    expect(api.calls).toBe(2)
+    // once the Fable figure is old while the engine's own figures are fresh, the band says why it is old
+    await clock.advance(11 * 60_000)
+    await $.session.measure({
+      context: { window: 200_000, tokens: 80_000, percent: 40 },
+      rateLimits: [{ kind: 'five_hour', percentUsed: 44 }, { kind: 'seven_day', percentUsed: 18 }],
+      changed: ['context', 'rateLimits'],
+    })
+    desktop = allOf(await $.ui.render(BAND('desktop')))
+    expect(desktop).toContain('44%')
+    expect(desktop).toContain('Fable 16분 전 · API 429')
+  })
+
+  test('a fresh API figure another session stored is used instead of a new request', async ($, on) => {
+    const api = { calls: 0 }
+    const shared = { at: NOW - 10_000, source: 'api', fiveHour: { pct: 9 }, sevenDay: { pct: 66 }, scoped: [{ name: 'Fable', window: { pct: 55 } }] }
+    const clock = windowsPc(on, { api, store: { claudeCache: shared } })
+    await $.session.start({ surface: 'desktop', isInteractive: true, cwd: 'C:\work' })
+    await clock.settle()
+    for (let i = 0; i < 30 && !allOf(await $.ui.render(BAND('desktop'))).includes('Fable'); i++) await clock.settle()
+    const desktop = allOf(await $.ui.render(BAND('desktop')))
+    expect(desktop).toContain('>Fable<')
+    expect(desktop).toContain('55%')
+    expect(api.calls).toBe(0)
+    // a minute on, the shared figure is old and this session asks the API itself
+    await clock.advance(60_000)
+    for (let i = 0; i < 30 && api.calls === 0; i++) await clock.settle()
+    expect(api.calls).toBe(1)
+    expect(allOf(await $.ui.render(BAND('desktop')))).toContain('100%')
   })
 
   test('Codex limits come from the app server when it answers, and carry no "기록" note', async ($, on) => {

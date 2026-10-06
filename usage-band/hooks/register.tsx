@@ -8,6 +8,8 @@
 //
 // Claude 5시간·주간·컨텍스트는 Claude Code가 응답마다 주는 값이고, 모델별 주간 한도(Fable 등)와 그 사이의
 // 갱신은 /usage 가 쓰는 사용량 API를 1분마다 세션의 자격 증명 핸들로 직접 받아서(claude-cache.ts) 채운다.
+// 열린 세션이 여럿이면 저장소($.store)를 같이 쓰므로 한 세션이 받은 값을 나머지가 가져다 쓰고, API가 거절하면
+// (429 등) 알려 준 만큼 쉬었다 다시 받는다. 못 받은 까닭은 저장소 claudeFetch에 남기고 띠의 메모에도 붙인다.
 // API를 못 쓰면(로그인 없음·게이트웨이) 상태줄이 남긴 캐시 파일로 대신한다. Codex 수치는 Codex CLI의 앱 서버에
 // 물어서(hooks/codex-limits.mjs, 공식 경로) 받고, 그게 안 되면 Codex가 이 PC에 남긴 세션 기록에서 읽는다.
 // /usagebar 로 두 줄 → 한 줄 → 숨김을 돌아가며 바꾼다.
@@ -21,6 +23,17 @@ import { panelSvg } from './panel'
 
 type Layout = 'full' | 'compact' | 'hidden'
 type ClaudeFigures = { limits: SessionRateLimit[]; at: number }
+/** 사용량 API를 마지막으로 받으려 한 결과. 저장소 claudeFetch에도 남겨서 띠가 옛 값을 보일 때 까닭을 찾을 수 있게 한다 */
+type FetchNote = {
+  at: number
+  session: string
+  /** ok 받음 · no-auth 자격 증명 없음 · http 거절(status) · shape 응답 모양이 다름 · error 연결 실패 */
+  outcome: 'ok' | 'no-auth' | 'http' | 'shape' | 'error'
+  status?: number
+  detail?: string
+  /** 다음에 다시 받아 볼 때(ms) */
+  retryAt?: number
+}
 
 const LAYOUTS: Layout[] = ['full', 'compact', 'hidden']
 const BIG_FILE = 3_500_000 // $.fs.read 한도(4 MiB)보다 작게
@@ -37,6 +50,8 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 const USAGE_HEADERS = { 'anthropic-beta': 'oauth-2025-04-20', accept: 'application/json' }
 const FETCH_GAP_MS = 30_000 // 이보다 자주는 받지 않는다(턴이 연달아 끝나도)
 const NO_AUTH_RETRY_MS = 10 * 60_000 // 자격 증명이 없다고 하면 이만큼 뒤에 다시 물어본다
+const FAIL_RETRY_MS = 5 * 60_000 // 사용량 API가 거절하거나(429·5xx) 끊기면 이만큼 뒤에 다시 받는다(Retry-After가 있으면 그만큼)
+const SHARED_FRESH_MS = 50_000 // 다른 세션이 이 안에 받아 둔 값이 저장소에 있으면 직접 받지 않는다
 const CODEX_LIVE_GAP_MS = 30_000 // Codex 앱 서버에는 이보다 자주 묻지 않는다
 const CODEX_LIVE_RETRY_MS = 10 * 60_000 // 앱 서버를 못 띄우면(node·codex 없음) 이만큼 뒤에 다시 해 본다
 
@@ -54,6 +69,8 @@ let configuredCache = ''
 let claudeCache: ClaudeCache | undefined
 let lastFetchAt = 0 // 사용량 API를 마지막으로 받은(또는 시도한) 때
 let noAuthUntil = 0 // 이때까지는 자격 증명을 다시 묻지 않는다
+let failUntil = 0 // 사용량 API가 거절한 뒤 이때까지는 다시 받지 않는다
+let lastFetch: FetchNote | undefined // 사용량 API를 마지막으로 받으려 한 결과
 let lastCodexLiveAt = 0 // Codex 앱 서버에 마지막으로 물은 때
 let codexLiveDownUntil = 0 // 이때까지는 앱 서버 대신 세션 기록만 읽는다
 let lastBandSize = ''
@@ -196,10 +213,36 @@ async function findCachePath($: EngineInterface): Promise<string> {
   return ''
 }
 
-/** 사용량 API에서 직접 받는다(5시간·주간·모델별 주간). 받았으면 true, 자격 증명이 없거나 실패하면 false */
+const isCache = (v: unknown): v is ClaudeCache => !!v && typeof v === 'object' && typeof (v as ClaudeCache).at === 'number' && Array.isArray((v as ClaudeCache).scoped)
+
+/** 다른 세션이 같은 저장소에 받아 둔 값을 가져온다. 1분 안에 API에서 받은 값이면 true(직접 받을 필요가 없다) */
+async function adoptShared($: EngineInterface, now: number): Promise<boolean> {
+  const shared = await $.store.get('claudeCache').catch(() => undefined)
+  if (!isCache(shared)) return false
+  if (shared.at > (claudeCache?.at ?? 0)) claudeCache = shared
+  return shared.source === 'api' && now - shared.at < SHARED_FRESH_MS
+}
+
+async function noteFetch($: EngineInterface, note: Omit<FetchNote, 'session'>) {
+  lastFetch = { ...note, session: sessionTag }
+  await $.store.set('claudeFetch', lastFetch).catch(() => undefined)
+}
+
+/** 거절당한 뒤 다시 받기까지: Retry-After(초)가 있으면 그만큼(1분~30분), 없으면 5분 */
+function retryGap(headers: Record<string, string>): number {
+  const sec = Number(headers['retry-after'])
+  if (!Number.isFinite(sec) || sec <= 0) return FAIL_RETRY_MS
+  return Math.min(30 * 60_000, Math.max(60_000, sec * 1000))
+}
+
+/** 사용량 API에서 직접 받는다(5시간·주간·모델별 주간). 받았으면(또는 다른 세션이 방금 받은 값을 썼으면) true,
+ *  자격 증명이 없거나 실패하면 false */
 async function fetchClaudeUsage($: EngineInterface): Promise<boolean> {
   const now = await $.clock.now()
-  if (now - lastFetchAt < FETCH_GAP_MS || now < noAuthUntil) return claudeCache?.source === 'api'
+  if (now - lastFetchAt < FETCH_GAP_MS) return claudeCache?.source === 'api'
+  // 세션이 여럿이면 저장소를 같이 쓴다: 누군가 방금 받았으면 그 값을 쓰고 API를 세션 수만큼 두드리지 않는다
+  if (await adoptShared($, now)) return true
+  if (now < noAuthUntil || now < failUntil) return claudeCache?.source === 'api'
   lastFetchAt = now
   let auth: { handle: string } | null = null
   try {
@@ -209,17 +252,29 @@ async function fetchClaudeUsage($: EngineInterface): Promise<boolean> {
   }
   if (!auth) {
     noAuthUntil = now + NO_AUTH_RETRY_MS
+    await noteFetch($, { at: now, outcome: 'no-auth', retryAt: noAuthUntil })
     return false
   }
   try {
     const r = await $.http.fetch(USAGE_URL, { auth: auth.handle, headers: USAGE_HEADERS })
-    if (!r.ok) return false
+    if (!r.ok) {
+      failUntil = now + retryGap(r.headers)
+      await noteFetch($, { at: now, outcome: 'http', status: r.status, detail: r.text.slice(0, 200), retryAt: failUntil })
+      return false
+    }
     const next = parseClaudeCache(r.text, now)
-    if (!next) return false
+    if (!next) {
+      failUntil = now + FAIL_RETRY_MS
+      await noteFetch($, { at: now, outcome: 'shape', detail: r.text.slice(0, 200), retryAt: failUntil })
+      return false
+    }
     claudeCache = { ...next, source: 'api' }
     await $.store.set('claudeCache', claudeCache)
+    await noteFetch($, { at: now, outcome: 'ok' })
     return true
-  } catch {
+  } catch (err) {
+    failUntil = now + FAIL_RETRY_MS
+    await noteFetch($, { at: now, outcome: 'error', detail: String(err).slice(0, 200), retryAt: failUntil })
     return false // 네트워크가 막혀도 띠는 계속 그린다
   }
 }
@@ -485,10 +540,12 @@ function rowsOf(now: number): BandRow[] {
   const lastSeen = Math.max(claude?.at ?? 0, claudeCache?.at ?? 0)
   const claudeNote =
     !five && !week ? '첫 응답 뒤에 한도가 보여요' : (isClaudeFromStore && !isCacheNewer) || now - lastSeen > STALE_MS ? `${agoText(now - lastSeen)} 기록` : undefined
-  // 엔진 값은 새것인데 모델별 한도(API를 못 써서 파일이나 옛 기록에서 온 것)만 오래된 경우
+  // 엔진 값은 새것인데 모델별 한도(API를 못 써서 파일이나 옛 기록에서 온 것)만 오래된 경우: 왜 못 받는지도 붙인다
+  const why =
+    lastFetch?.outcome === 'http' ? ` · API ${lastFetch.status}` : lastFetch?.outcome === 'no-auth' ? ' · 자격 증명 없음' : lastFetch?.outcome === 'error' ? ' · API 연결 실패' : ''
   const cacheNote =
     claudeCache && scoped.length > 0 && now - claudeCache.at > STALE_MS
-      ? `${claudeCache.scoped.map(s => s.name).join('·')} ${agoText(now - claudeCache.at)} 기록`
+      ? `${claudeCache.scoped.map(s => s.name).join('·')} ${agoText(now - claudeCache.at)} 기록${why}`
       : undefined
   const claudeRow: BandRow = {
     name: 'Claude',
